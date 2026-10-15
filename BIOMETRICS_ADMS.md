@@ -18,7 +18,7 @@ The goal is to build a maintainable Django application that can:
 
 ## 2. What Is ADMS?
 
-**ADMS** is commonly expanded in the ZKTeco device ecosystem as **Automatic Data Master Server**. It describes a device-to-server communication arrangement used by compatible devices to exchange data with a server. Many ADMS integrations use HTTP requests.
+[**ADMS**](https://github.com/syedhrgf/Dev-Tips/blob/main/ADMS-Based%20vs%20Custom%20HTTP%20Approach.md) is commonly expanded in the ZKTeco device ecosystem as **Automatic Data Master Server**. It describes a device-to-server communication arrangement used by compatible devices to exchange data with a server. Many ADMS integrations use HTTP requests.
 
 In this project:
 
