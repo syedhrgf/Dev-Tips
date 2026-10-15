@@ -1,505 +1,526 @@
-# ZKTeco K45 Pro Integration: ADMS-Based vs Custom HTTP Approach
+# ADMS Explained  — ZKTeco K45 Pro
 
-## 1. Purpose
+## 1. What Is ADMS?
 
-This note compares two ways to receive biometric attendance data in a Django application:
+**ADMS** stands for **Automatic Data Master Server** in the context of ZKTeco devices.
 
-1. **ADMS-compatible receiver** — implement the device-facing endpoints and request/response behavior expected by a compatible ZKTeco device.
-2. **Custom HTTP API** — define your own endpoints and payload contract, then send data to them using a client or a device that explicitly supports that custom contract.
+It is a device-management and communication mechanism that allows a compatible biometric device to communicate with a server, commonly using HTTP-based requests.
 
-These approaches are not interchangeable. A device configured to send ADMS requests will not automatically understand an arbitrary custom API.
+For example, a ZKTeco K45 Pro can be configured to send attendance data to a server running a Django application.
 
-> **Important terminology:** ADMS is a device communication protocol/workflow, not one universal Python SDK package. An ADMS-compatible receiver can be implemented directly in Django. A separate SDK is optional and must specifically support the device, firmware, and operations you need.
+ADMS is not a Python library. It is also not simply another name for HTTP. The device firmware determines the particular ADMS endpoints, request formats, and responses it supports.
 
----
-
-## 2. The Difference
-
-| Area | ADMS-compatible receiver | Custom HTTP API |
-|---|---|---|
-| Endpoint paths | Uses paths and request patterns expected by the device, often `/iclock/...` | Uses routes you define, such as `/api/biometrics/punches/` |
-| Request format | Follows the device's actual ADMS payload format | Follows your own documented JSON or other payload format |
-| Responses | Must match the device firmware's expected response format | Defined by your API contract |
-| Device compatibility | Suitable when the device supports the ADMS workflow you implement | Suitable only if the device can be configured to call your custom API, or if a separate gateway/client translates the device protocol |
-| Control over schema | Constrained by device payloads and protocol behavior | You define the schema |
-| SDK required? | Not necessarily; a compatible receiver can be implemented directly | Not necessarily; standard Django HTTP views are enough |
-| Best use | Direct device-to-server integration | Application-to-application integration or a custom gateway |
-
-### Important distinction
-
-Writing a Django function that receives `/iclock/cdata` is not automatically a complete ADMS implementation. The handler must also correctly support the relevant device request formats, parameters, acknowledgements, and any required polling/command behavior.
-
-Likewise, a custom endpoint is not an ADMS endpoint just because it receives attendance data over HTTP.
+> **Important:** ADMS implementations can vary by device model and firmware. Always verify the exact request format against the device's documentation or actual network traffic.
 
 ---
 
-## 3. Approach A — ADMS-Compatible Receiver
+## 2. Understand the Difference Between ADMS, HTTP, and a Library
 
-### 3.1 Typical flow
+These terms describe different things.
+
+| Term           | Meaning                                          | Example                                     |
+| -------------- | ------------------------------------------------ | ------------------------------------------- |
+| ADMS           | Device-management and communication mechanism    | Biometric device communicates with a server |
+| HTTP           | Protocol used to exchange requests and responses | `POST /iclock/cdata`                        |
+| Django         | Python web framework                             | Receives HTTP requests                      |
+| Python library | Reusable code that provides functionality        | A package that parses attendance records    |
+| API endpoint   | URL where an application receives a request      | `/iclock/cdata`                             |
+| Database       | Stores attendance records                        | PostgreSQL or SQLite                        |
+
+### Simple analogy
+
+Imagine an office:
+
+- **ADMS** is the communication arrangement between the biometric machine and the server.
+- **HTTP** is the language used to exchange requests and responses.
+- **Django** is the receptionist that receives the requests.
+- **Your service functions** process the information.
+- **The database** stores the attendance records.
+
+You do not necessarily need a dedicated ADMS Python library. You can implement the required HTTP endpoints yourself, provided they match the device's expectations.
+
+---
+
+## 3. How the Biometric Device Communicates with Django
+
+Suppose your setup is:
+
+- Biometric device: ZKTeco K45 Pro
+- Laptop IP: `192.168.1.37`
+- Device IP: `192.168.1.18`
+- Server port: `8000`
+- Django application: running on the laptop
+
+The device is configured with the laptop's IP address and port.
+
+The communication flow looks like this:
 
 ```text
 ZKTeco K45 Pro
-    |
-    | HTTP request expected by the device's ADMS workflow
-    v
-/iclock/cdata
-    |
-    v
-Django ADMS view
-    |
-    v
-ADMS service/parser
-    |
-    v
-AttendanceLog database table
-    |
-    v
-Protocol-compatible response
+      |
+      | HTTP request
+      | POST /iclock/cdata
+      | Attendance data
+      v
+Django Application
+      |
+      v
+URL Routing
+      |
+      v
+biometrics_cdata()
+      |
+      v
+save_attendance()
+      |
+      v
+AttendanceLog Model
+      |
+      v
+Database
 ```
 
-Common ZKTeco-style ADMS integrations may use routes such as `/iclock/cdata` for data exchange and `/iclock/getrequest` for polling. Exact endpoints, payload formats, and response text must be verified against the specific device and firmware.
+In this setup, the biometric device initiates the HTTP request to the server. Your application does not need to connect directly to the device's attendance database.
 
-### 3.2 Example parser for the observed whitespace format
-
-The following sample is based on a payload observed in your test environment:
-
-```text
-ASD 2026-10-14 14:54:01 0 1 0 0 0 0 0 0 11204
-```
-
-For this specific assumed format:
-
-```text
-PIN DATE TIME STATUS VERIFY_MODE WORK_CODE [EXTRA FIELDS...]
-```
-
-Use a parser like this only after confirming the field order for the device:
-
-```python
-# biometrics/services/adms.py
-
-import re
-from datetime import datetime
-
-from django.utils import timezone
-
-
-DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-TIME_RE = re.compile(r"^\d{2}:\d{2}:\d{2}$")
-
-
-def parse_adms_attendance_line(line: str) -> dict | None:
-    """Parse one verified whitespace-delimited ATTLOG line."""
-    raw_line = line.rstrip("\r\n")
-    parts = raw_line.strip().split()
-
-    # Expected: PIN DATE TIME STATUS [VERIFY_MODE] [WORK_CODE] ...
-    if len(parts) < 4:
-        return None
-
-    if not DATE_RE.fullmatch(parts[1]):
-        return None
-
-    if not TIME_RE.fullmatch(parts[2]):
-        return None
-
-    timestamp_text = f"{parts[1]} {parts[2]}"
-
-    try:
-        naive_timestamp = datetime.strptime(
-            timestamp_text,
-            "%Y-%m-%d %H:%M:%S",
-        )
-    except ValueError:
-        return None
-
-    # This assumes the device timestamp represents Asia/Kolkata local time.
-    # Confirm this assumption and your Django TIME_ZONE/USE_TZ settings.
-    aware_timestamp = timezone.make_aware(
-        naive_timestamp,
-        timezone=timezone.get_current_timezone(),
-    )
-
-    return {
-        "employee_id": parts[0],
-        "punch_time": aware_timestamp,
-        "punch_status": parts[3],
-        "verify_mode": parts[4] if len(parts) > 4 else "",
-        "work_code": parts[5] if len(parts) > 5 else "",
-        "raw_line": raw_line,
-    }
-```
-
-**Timezone warning:** The example uses Django's configured current timezone. Ensure it is set to the intended timezone before using this in production. Do not assume the device timestamp is UTC or local time without checking device configuration.
-
-### 3.3 Example ADMS data endpoint
-
-This is an illustrative Django view. It shows the shape of a receiver, not a guarantee of the exact response required by every K45 Pro firmware.
-
-```python
-# biometrics/views.py
-
-import logging
-
-from django.http import HttpResponse
-from django.views.decorators.csrf import csrf_exempt
-from django.views.decorators.http import require_http_methods
-
-from .models import BiometricDevice
-from .services.adms import parse_adms_attendance_line, save_parsed_records
-
-logger = logging.getLogger(__name__)
-
-
-@csrf_exempt  # Scope this exemption to the device-facing endpoint only.
-@require_http_methods(["GET", "POST"])
-def adms_cdata(request):
-    serial = request.GET.get("SN", "").strip()
-
-    if not serial:
-        return HttpResponse(
-            "Missing serial number",
-            status=400,
-            content_type="text/plain; charset=utf-8",
-        )
-
-    device = BiometricDevice.objects.filter(
-        serial_number=serial,
-        is_active=True,
-    ).first()
-
-    if device is None:
-        logger.warning("ADMS request from unregistered/inactive device: %s", serial)
-        return HttpResponse(
-            "Unknown device",
-            status=403,
-            content_type="text/plain; charset=utf-8",
-        )
-
-    if request.method == "GET":
-        # Return the actual device configuration response required by
-        # the firmware. Do not copy a generic response without testing it.
-        return HttpResponse(
-            "OK",
-            content_type="text/plain; charset=utf-8",
-        )
-
-    table = request.GET.get("table", "").strip().upper()
-    if table != "ATTLOG":
-        # Other tables may need their own handlers, depending on firmware.
-        return HttpResponse(
-            "OK",
-            content_type="text/plain; charset=utf-8",
-        )
-
-    if len(request.body) > 1024 * 1024:
-        return HttpResponse("Payload too large", status=413)
-
-    body = request.body.decode("utf-8", errors="replace")
-
-    records = []
-    rejected_lines = 0
-
-    for line in body.splitlines():
-        if not line.strip():
-            continue
-
-        parsed = parse_adms_attendance_line(line)
-        if parsed is None:
-            rejected_lines += 1
-            logger.warning(
-                "Rejected malformed ADMS attendance line for serial=%s",
-                serial,
-            )
-            continue
-
-        records.append(parsed)
-
-    # Implement this service with the actual model fields and a tested
-    # duplicate strategy. It should save records transactionally.
-    save_parsed_records(device=device, serial=serial, records=records)
-
-    logger.info(
-        "ADMS ATTLOG processed: serial=%s accepted=%s rejected=%s",
-        serial,
-        len(records),
-        rejected_lines,
-    )
-
-    # The acknowledgement must be confirmed against the actual firmware.
-    return HttpResponse("OK", content_type="text/plain; charset=utf-8")
-```
-
-The imports and helper `save_parsed_records()` above are illustrative; you must implement that helper to match your actual models and duplicate policy. If your current service already has `save_attendance(serial, body)`, you can call it instead, after adding registered-device validation and confirming the protocol response.
-
-**Do not deploy the generic `OK` responses blindly.** Your current device may require a particular configuration payload on a GET request, and a specific acknowledgement format for data uploads. Use observed device traffic and reliable device documentation to confirm the response.
-
-### 3.4 Example URL routing
-
-```python
-# biometrics/urls.py
-
-from django.urls import path
-from . import views
-
-urlpatterns = [
-    path("iclock/cdata", views.adms_cdata, name="adms_cdata"),
-]
-```
-
-Include this URL configuration from the project's root URL configuration. Confirm whether the device requests paths with or without a trailing slash.
-
-### 3.5 What a complete ADMS receiver may need
-
-Depending on firmware and enabled features, you may need to implement:
-
-- Device identification and registration checks.
-- Data upload and the expected acknowledgement.
-- GET configuration/options response.
-- Device polling for server commands.
-- Command-result handling.
-- Device time/configuration behavior if required.
-- Additional data tables if enabled.
-- Duplicate protection, error logging, and payload validation.
-
-Implement only the protocol behavior required by the device, but verify what it expects before declaring the integration complete.
+The precise request sequence depends on the device firmware and configuration.
 
 ---
 
-## 4. Approach B — Custom HTTP API
+## 4. ADMS vs Traditional ZKTeco Communication
 
-A custom API is appropriate when your own client or a gateway sends data to Django in a schema you control. It is **not automatically compatible with the K45 Pro's ADMS mode**.
+ZKTeco devices may support different communication methods.
 
-### 4.1 Typical flow
+| Feature                     | ADMS-style communication                 | Traditional device communication                                |
+| --------------------------- | ---------------------------------------- | --------------------------------------------------------------- |
+| Communication pattern       | Device sends requests to a server        | Application connects to the device                              |
+| Common transport            | HTTP                                     | Vendor-specific protocol over TCP                               |
+| Commonly encountered port   | `8000`, depending on configuration       | `4370`, depending on configuration                              |
+| Django HTTP endpoints       | Typically used                           | Not used directly for the traditional protocol                  |
+| Possible Python integration | Django views and custom parsing          | A compatible library such as `pyzk`                             |
+| Typical use                 | Attendance uploads and device management | Reading device data or performing supported operations directly |
 
-```text
-Custom client or gateway
-    |
-    | POST JSON to your own API contract
-    v
-/api/biometrics/punches/
-    |
-    v
-Django validates JSON and authorization
-    |
-    v
-Application service
-    |
-    v
-AttendanceLog database table
-```
+**Ports are not universal standards.** Confirm the actual communication method and port supported by your model and configuration.
 
-For example, a custom client could send:
+For example, a timeout when using `pyzk` on port `8000` does not automatically mean the device is offline. It may mean the application is using the wrong protocol for that port.
+
+---
+
+## 5. What Is an ADMS Endpoint?
+
+An endpoint is a URL that receives requests.
+
+Your Django application may expose endpoints such as:
+
+| Endpoint             | Possible purpose                                           |
+| -------------------- | ---------------------------------------------------------- |
+| `/iclock/cdata`      | Receive attendance data or provide configuration responses |
+| `/iclock/getrequest` | Allow the device to request pending commands               |
+| `/iclock/devicecmd`  | Handle device command-related communication                |
+| `/iclock/registry`   | Handle registration-related communication if supported     |
+| `/biometrics/ping`   | Custom endpoint to test server connectivity                |
+
+The first four paths resemble endpoints used in some ZKTeco communication implementations. Whether a particular device calls them, and what it expects from them, must be verified against the firmware.
+
+The `/biometrics/ping` endpoint is a custom application endpoint, not necessarily a standard ADMS endpoint.
+
+### Example
+
+A device might send:
 
 ```http
-POST /api/biometrics/punches/ HTTP/1.1
-Content-Type: application/json
-Authorization: Bearer <token>
+POST /iclock/cdata?SN=WED3240400871&table=ATTLOG HTTP/1.1
+Host: 192.168.1.37:8000
+Content-Type: text/plain
 ```
 
-```json
-{
-  "device_serial": "WED3240400871",
-  "employee_id": "ASD",
-  "punch_time": "2026-10-14T14:54:01+05:30",
-  "punch_status": "0",
-  "verify_mode": "1",
-  "work_code": "0"
-}
-```
+The request body might contain attendance records.
 
-This JSON structure is **your own API schema**, not the raw ADMS payload. A client or gateway must transform the device's data into this shape.
-
-### 4.2 Example custom Django endpoint
-
-This simple example validates a JSON body and demonstrates where application persistence belongs. It assumes a bearer-token authentication layer is added by your project; it does not implement authentication itself and should not be exposed publicly as-is.
-
-```python
-# biometrics/custom_api_views.py
-
-import json
-from datetime import datetime
-
-from django.http import JsonResponse
-from django.views.decorators.http import require_POST
-from django.views.decorators.csrf import csrf_exempt
-from django.utils.dateparse import parse_datetime
-
-from .models import BiometricDevice
-
-
-@csrf_exempt  # Only suitable when replaced/supplemented by explicit API authentication.
-@require_POST
-def custom_punch_api(request):
-    if len(request.body) > 64 * 1024:
-        return JsonResponse({"error": "Payload too large"}, status=413)
-
-    try:
-        payload = json.loads(request.body)
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        return JsonResponse({"error": "Invalid JSON"}, status=400)
-
-    if not isinstance(payload, dict):
-        return JsonResponse({"error": "JSON object required"}, status=400)
-
-    required = (
-        "device_serial",
-        "employee_id",
-        "punch_time",
-        "punch_status",
-        "verify_mode",
-    )
-    missing = [key for key in required if not str(payload.get(key, "")).strip()]
-    if missing:
-        return JsonResponse(
-            {"error": "Missing required fields", "fields": missing},
-            status=400,
-        )
-
-    serial = str(payload["device_serial"]).strip()
-    device = BiometricDevice.objects.filter(
-        serial_number=serial,
-        is_active=True,
-    ).first()
-
-    if device is None:
-        return JsonResponse({"error": "Unknown or inactive device"}, status=403)
-
-    punch_time = parse_datetime(str(payload["punch_time"]))
-    if punch_time is None or punch_time.utcoffset() is None:
-        return JsonResponse(
-            {"error": "punch_time must be an ISO-8601 timestamp with timezone"},
-            status=400,
-        )
-
-    # Authenticate the client before accepting data in production.
-    # Then pass validated data to a shared persistence service that:
-    #   1. maps the employee identifier,
-    #   2. applies a defined duplicate policy,
-    #   3. writes in a transaction,
-    #   4. records a safe diagnostic outcome.
-    #
-    # Do not write directly until the actual AttendanceLog fields and
-    # uniqueness constraints have been confirmed.
-
-    return JsonResponse(
-        {
-            "accepted": True,
-            "device_serial": serial,
-            "message": "Validated; connect this point to the persistence service.",
-        },
-        status=202,
-    )
-```
-
-This example deliberately returns `202 Accepted` after validation to show the API contract. It does **not** save an attendance row yet. Connect a tested persistence service before treating it as a working attendance endpoint.
-
-### 4.3 Example custom API URL
-
-```python
-# biometrics/urls.py
-
-from django.urls import path
-from . import custom_api_views
-
-urlpatterns = [
-    path(
-        "api/biometrics/punches/",
-        custom_api_views.custom_punch_api,
-        name="custom_punch_api",
-    ),
-]
-```
-
-This URL is for your own client or gateway. Do not change the K45 Pro's ADMS destination to this route unless the device can be configured to send the required custom JSON contract.
+The exact query parameters, headers, and body format depend on the device.
 
 ---
 
-## 5. Which Approach Should You Use?
+## 6. Understanding Your Django Implementation
 
-For your current setup, the device is configured to send ADMS-style requests to your local server:
+Your implementation is divided into views and service functions.
 
-- Server IP: `192.168.1.37`
-- Port: `8000`
-- Example device endpoint: `/iclock/cdata`
-- Example serial number: `WED3240400871`
+### A. Django views
 
-Therefore, **continue with the ADMS-compatible receiver** for direct communication with the device. You already have custom parsing and persistence functions; those can form the service layer underneath the ADMS endpoint.
+Views receive HTTP requests and return HTTP responses.
 
-Use a custom JSON API if you later build a separate gateway, a mobile/web client, or another service that submits normalized attendance events. You can reuse the same validation and persistence service for both inputs, while keeping each input adapter separate.
+For example:
 
-Suggested architecture:
+```python
+@csrf_exempt
+@require_http_methods(["GET", "POST"])
+def biometrics_cdata(request):
+    serial = request.GET.get("SN", "")
+    table = request.GET.get("table", "").upper()
+
+    record_device_request(request)
+    mark_device_seen(serial)
+
+    if request.method == "POST":
+        if table in {"ATTLOG", "ATTLOGS"}:
+            save_attendance(serial, request.body)
+
+        return plain_response("OK")
+
+    return plain_response("OK")
+```
+
+This is a simplified example of the request flow, not a complete replacement for your existing implementation. Your real GET response may need to return device configuration text rather than just `OK`.
+
+### B. `plain_response()`
+
+This function sends a plain-text response:
+
+```python
+from django.http import HttpResponse
+
+
+def plain_response(text="OK"):
+    return HttpResponse(
+        text,
+        content_type="text/plain; charset=utf-8",
+    )
+```
+
+The response body must match what the device expects for that request.
+
+### C. `record_device_request()`
+
+This function records incoming requests for debugging and auditing.
+
+It can help you inspect:
+
+- Which endpoint the device contacted
+- The HTTP method
+- The serial number supplied in the request
+- Query parameters
+- The request body, subject to size limits
+
+Be careful not to log sensitive employee information unnecessarily.
+
+### D. `mark_device_seen()`
+
+This function updates the registered device's last-seen time and, when available, its observed IP address.
+
+It helps your application determine whether a device has recently communicated with the server.
+
+### E. `parse_attendance_line()`
+
+This function converts a raw attendance line into structured data.
+
+For example, an illustrative positional record could look like:
 
 ```text
-                         +--------------------------+
-K45 Pro -- ADMS HTTP --->| ADMS view / ADMS adapter |
-                         +-------------+------------+
-                                       |
-                                       v
-                         +--------------------------+
-Custom client -- JSON -->| Custom API adapter       |
-                         +-------------+------------+
-                                       |
-                                       v
-                         +--------------------------+
-                         | Shared validation and    |
-                         | attendance persistence   |
-                         +-------------+------------+
-                                       |
-                                       v
-                         +--------------------------+
-                         | AttendanceLog database   |
-                         +--------------------------+
+1001    2026-10-15 09:02:30    0    1    0
 ```
 
-This avoids duplicating database logic while keeping the device protocol separate from your custom API.
+A parser might interpret it as:
+
+- Employee PIN: `1001`
+- Punch time: `2026-10-15 09:02:30`
+- Status: `0`
+- Verification mode: `1`
+- Work code: `0`
+
+These field meanings are illustrative. Confirm the column order and status codes for your device's actual payload.
+
+Your implementation should also support the formats your device actually sends, rather than assuming all devices use the same layout.
+
+### F. `save_attendance()`
+
+This service function is responsible for:
+
+1. Finding the registered biometric device.
+2. Reading the received attendance payload.
+3. Splitting the payload into individual records.
+4. Parsing each record.
+5. Validating employee identifiers and timestamps.
+6. Saving attendance records.
+7. Avoiding duplicate records.
+
+Conceptually:
+
+```text
+Raw HTTP body
+     |
+     v
+Split into lines
+     |
+     v
+Parse each line
+     |
+     v
+Validate record
+     |
+     v
+Check duplicate
+     |
+     v
+Save AttendanceLog
+```
+
+A production implementation should distinguish between records that were newly created, already existed, or failed validation.
 
 ---
 
-## 6. Important Improvements for Your Current Code
+## 7. Why Does the Device Send `SN` and `table`?
 
-Your existing service functions are a useful starting point:
+A request may contain parameters such as:
 
-- `parse_attendance_line()` — payload parser.
-- `record_device_request()` — diagnostic request logger.
-- `save_attendance()` — attendance persistence.
-- `mark_device_seen()` — last-seen tracking.
+```text
+SN=WED3240400871
+table=ATTLOG
+```
 
-Before production, review these items:
+### `SN`
 
-1. **Validate the serial number and active device** before accepting attendance records.
-2. **Confirm actual field positions** from K45 Pro payloads. Do not assume all formats are whitespace-delimited or that status codes have universal meanings.
-3. **Validate timestamps**, including timezone interpretation. A string shaped like a date is not necessarily a valid date.
-4. **Use database uniqueness constraints** for the chosen event identity; `get_or_create()` alone is not a substitute for a well-defined concurrency-safe uniqueness policy.
-5. **Bound request size before fully processing the body.** Slicing `request.body` after Django has already read it does not prevent Django from receiving the whole body into memory.
-6. **Protect diagnostics.** Query strings and raw bodies may contain sensitive information; limit access and retention.
-7. **Do not overwrite configured IP information blindly** with the source IP of each request. Consider a separate `last_request_ip`.
-8. **Confirm protocol responses** from the device documentation and observed requests. A response that works for one endpoint may be incorrect for another.
-9. **Keep device events separate from HR calculations.** A raw punch code does not itself calculate worked hours or overtime.
-10. **Use authentication and network controls** appropriate to the device's capabilities. A serial number alone is not strong authentication.
+`SN` commonly identifies the device's serial number.
 
----
+Your application can use it to find the corresponding `BiometricDevice` record.
 
-## 7. Key Terms
+Do not trust the serial number alone as authentication. Restrict access to registered devices and consider network-level controls or additional verification.
 
-| Term | Meaning |
-|---|---|
-| ADMS receiver | Server-side component that implements the relevant device communication behavior |
-| ADMS SDK | A software library, if available for the device, that abstracts some protocol operations; not required for every receiver |
-| Protocol adapter | Code that converts a particular input protocol into your application's internal data format |
-| Custom API | An endpoint and payload contract designed by your application |
-| Parser | Code that converts raw text or bytes into structured fields |
-| Persistence service | Code that validates and stores normalized attendance records |
-| Idempotency | Processing retries without creating unintended duplicate records |
-| Acknowledgement | Server response that tells the device how its request was handled |
-| Gateway | A service that communicates with the device and forwards normalized data to another API |
+### `table`
+
+The `table` parameter identifies the category of data involved in the request.
+
+For example, `ATTLOG` commonly refers to attendance logs in compatible ZKTeco implementations.
+
+Your view can use it to decide which parser or service should process the request.
 
 ---
 
-## 8. Summary
+## 8. Why Does the Server Respond with `OK`?
 
-- **ADMS-compatible approach:** implement the request paths, payload parsing, and response behavior expected by the K45 Pro.
-- **Custom API approach:** design your own HTTP/JSON contract for a client or gateway that supports it.
-- Both can use Django and Python; neither automatically requires a separate SDK.
-- Your current code is a custom implementation of parts of an ADMS receiver, not a dedicated SDK integration.
-- For your direct K45 Pro connection, finish and test the ADMS-compatible path first.
+A device usually expects a response after sending an HTTP request.
+
+For example:
+
+```http
+HTTP/1.1 200 OK
+Content-Type: text/plain; charset=utf-8
+
+OK
+```
+
+This indicates that the server returned a successful HTTP response with an `OK` body.
+
+However, **returning `OK` does not prove that the attendance record was saved correctly**.
+
+A robust implementation should:
+
+- Validate the incoming data.
+- Save valid records reliably.
+- Log parsing and database errors.
+- Return the response expected by the device firmware.
+- Avoid acknowledging data as successfully processed when it has not been persisted, where the device's retry behavior permits this distinction.
+
+Some devices expect a particular configuration response during GET requests. For those requests, returning only `OK` may be insufficient.
+
+---
+
+## 9. What Is `GET OPTION FROM`?
+
+Some ZKTeco communication implementations use a configuration response resembling:
+
+```text
+GET OPTION FROM: WED3240400871
+ErrorDelay=30
+Delay=10
+TransTimes=00:00;14:05
+TransInterval=1
+TransFlag=TransData AttLog
+Realtime=1
+Encrypt=None
+TimeZone=5.5
+```
+
+This is an illustrative example, not a verified configuration for every K45 Pro firmware version.
+
+Your Django view may return such a response when the device requests configuration.
+
+The individual settings can affect communication behavior, data transfer, or scheduling. Their exact meanings and valid values should be confirmed against the device documentation.
+
+In particular:
+
+- Do not assume every setting is supported.
+- Do not assume every firmware version interprets settings identically.
+- Verify whether the device expects this response at the specific endpoint.
+- Confirm the timezone convention expected by the firmware.
+
+---
+
+## 10. What Are `getrequest` and `devicecmd`?
+
+These endpoints may participate in command polling and device management.
+
+### `/iclock/getrequest`
+
+A device may periodically request pending commands from the server.
+
+A basic implementation that always returns `OK` can acknowledge the request but does not provide a real command queue.
+
+If you need server-to-device commands, you may need to implement:
+
+1. A database model for queued commands.
+2. A mechanism to associate commands with a device.
+3. A polling response in the expected format.
+4. Command identifiers and status tracking.
+5. Acknowledgement and retry handling.
+
+### `/iclock/devicecmd`
+
+A device may use a command-related endpoint to communicate command results or acknowledgements.
+
+Simply recording the request and returning `OK` does not necessarily process those results.
+
+Implement the exact behavior only after confirming which command exchange your firmware supports.
+
+---
+
+## 11. What Is the Difference Between a Custom HTTP API and ADMS?
+
+A custom HTTP API is an API whose paths and request formats you define.
+
+For example:
+
+```text
+POST /api/attendance/
+```
+
+You can decide what JSON fields it accepts and how authentication works.
+
+An ADMS-compatible integration is different because the device firmware expects specific communication behavior, request formats, endpoint paths, and response conventions.
+
+For example:
+
+```text
+POST /iclock/cdata?SN=...&table=ATTLOG
+```
+
+You can write the endpoint yourself in Django, but the implementation must follow the behavior expected by the device.
+
+**The key distinction is compatibility, not whether you use a library.**
+
+You do not need to install a dedicated ADMS package to write Django endpoints. You do need to implement the required communication conventions correctly.
+
+Also, an arbitrary custom HTTP API will not automatically work with the device unless the firmware supports that API or can be configured to use it.
+
+---
+
+## 12. Security and Reliability Checklist
+
+Before using the integration with real employee attendance, check the following.
+
+- [ ] Only registered, active devices can submit attendance.
+- [ ] Incoming payloads have a reasonable maximum size.
+- [ ] Serial numbers and employee identifiers are validated.
+- [ ] Timestamps and status codes are parsed safely.
+- [ ] Duplicate punches are handled consistently.
+- [ ] Invalid records are logged without exposing unnecessary personal information.
+- [ ] Database writes use appropriate transaction handling.
+- [ ] Device time and application timezone are configured correctly.
+- [ ] The server is reachable from the device's network.
+- [ ] Firewall rules allow the required traffic.
+- [ ] HTTP responses match the firmware's expectations.
+- [ ] Command polling and acknowledgement behavior is implemented if required.
+- [ ] Production deployments use suitable network restrictions and transport security where supported.
+
+**Important:** Truncating `request.body` after accessing it does not prevent Django from first reading a large request into memory. Enforce appropriate request-size limits at the web server and application layers.
+
+---
+
+## 13. How to Test the Integration
+
+### Step 1: Confirm network connectivity
+
+From the laptop, test whether the device is reachable:
+
+```powershell
+ping 192.168.1.18
+```
+
+A successful ping indicates IP-level reachability for ICMP, not that the ADMS service is working.
+
+### Step 2: Start Django on the correct interface
+
+For a development environment:
+
+```bash
+python manage.py runserver 0.0.0.0:8000
+```
+
+This makes the development server listen on available network interfaces. It is not a production deployment recommendation.
+
+### Step 3: Confirm the laptop address
+
+On Windows:
+
+```powershell
+ipconfig
+```
+
+Verify that the laptop's active network interface uses the IP address configured in the biometric device.
+
+### Step 4: Inspect Django logs
+
+Check whether requests arrive at:
+
+```text
+/iclock/cdata
+/iclock/getrequest
+/iclock/devicecmd
+```
+
+Also inspect your stored `DeviceRequest` records.
+
+### Step 5: Perform a test punch
+
+Use an approved test employee and record the request body, serial number, table name, and response.
+
+Compare the actual payload with the assumptions made by `parse_attendance_line()`.
+
+### Step 6: Verify the database
+
+Check that the attendance record exists in `AttendanceLog` with the correct employee, device, timestamp, and status.
+
+Repeat a test if necessary to verify that duplicate submissions do not create duplicate attendance records.
+
+---
+
+## 14. Final Mental Model
+
+Remember these five points:
+
+1. **ADMS** describes a device-management and communication mechanism; exact behavior varies by implementation.
+2. **HTTP** is the transport protocol used by your HTTP-based integration.
+3. **Django views** receive the device's requests.
+4. **Service functions** parse and validate the data before saving it.
+5. **The database** stores the resulting attendance records.
+
+Your architecture is therefore:
+
+```text
+Biometric Device
+       |
+       | HTTP / ADMS-style communication
+       v
+Django URL Routing
+       |
+       v
+Django Views
+       |
+       v
+Biometric Services
+       |
+       v
+Django Models
+       |
+       v
+Database
+```
+
+The most important next step is to capture the actual requests sent by your K45 Pro and confirm the firmware's expected response formats. That will tell you whether your current endpoints are genuinely compatible with the device's ADMS implementation, rather than merely accepting HTTP requests.
