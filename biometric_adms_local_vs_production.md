@@ -2,7 +2,7 @@
 
 ## 1. The Core Concept
 
-In local development, the biometric machine and Django application communicate over the same LAN because the Django server uses the laptop's private IP address.
+In local development, the biometric machine and Django application communicate over the same LAN ([LAN documentation](https://github.com/syedhrgf/Dev-Tips/blob/main/lan.md)) because the Django server uses the laptop's private IP address.
 
 In production, the biometric machine can communicate with Django over the internet using the server's public IP address or domain.
 
@@ -28,7 +28,7 @@ The biometric device sends requests to:
 http://192.168.1.37:8000/iclock/cdata
 ```
 
-Both devices are connected to the same LAN. The router can route traffic between their private IP addresses.
+Both devices are connected to the same [LAN](https://github.com/syedhrgf/Dev-Tips/blob/main/lan.md). The router can route traffic between their private IP addresses.
 
 ```text
 Biometric device
@@ -63,25 +63,25 @@ The domain resolves to the production server's publicly reachable address. Route
 
 ```text
 Company office network
-┌────────────────────────┐
-│ Biometric device       │
+┌─────────────────────────┐
+│ Biometric device        │
 │ Private IP: 192.168.1.18│
-└────────────┬───────────┘
+└────────────┬────────────┘
              |
              | Office router
              v
-        INTERNET
+          INTERNET
              |
              | Public DNS / routing
              v
 Cloud data center
 ┌────────────────────────┐
 │ Public domain/IP       │
-│ Nginx / HTTPS           │
-│ Django ADMS endpoints   │
+│ Nginx / HTTPS          │
+│ Django ADMS endpoints  │
 └────────────┬───────────┘
              v
-      Production database
+     Production database
 ```
 
 The device and server are on different networks, but communication succeeds because the server has a reachable address and the network allows the connection.
@@ -94,7 +94,7 @@ Private IP addresses such as `192.168.1.18` and `192.168.1.37` are intended for 
 
 For example:
 
-- The office router knows how to reach `192.168.1.37` inside the office LAN.
+- The office router knows how to reach `192.168.1.37` inside the office [LAN](https://github.com/syedhrgf/Dev-Tips/blob/main/lan.md).
 - A cloud server on an unrelated network does not automatically know how to reach that private address.
 - A biometric device in the office cannot directly use a cloud server's private IP unless a private route or VPN connects the networks.
 
@@ -110,7 +110,7 @@ Five things must be true:
 4. **Correct endpoint:** The production web server forwards the ADMS request to the correct Django endpoint.
 5. **Running services:** Django and the production database are available to process and store attendance.
 
-The same LAN is only one way to achieve reachability. Public internet routing or a private network/VPN can also provide it.
+The same [LAN](https://github.com/syedhrgf/Dev-Tips/blob/main/lan.md) is only one way to achieve reachability. Public internet routing or a private network/VPN can also provide it.
 
 ## 6. Does the Application Need to Be Open on a Laptop?
 
@@ -146,6 +146,6 @@ For a typical ADMS integration, the device initiates HTTP requests to the config
 
 ## Final Takeaway
 
-**Local development relies on a shared LAN because the application is addressed through a private IP. Production can work across different networks because the device connects to a publicly reachable server address through the internet.**
+**Local development relies on a shared [LAN](https://github.com/syedhrgf/Dev-Tips/blob/main/lan.md) because the application is addressed through a private IP. Production can work across different networks because the device connects to a publicly reachable server address through the internet.**
 
 The key condition is **network reachability**, not a shared network.
