@@ -1,4 +1,4 @@
-# ADMS Explained  — ZKTeco K45 Pro
+# ADMS Explained  — ZKTeco K45 Pro (Machine)
 
 ## 1. What Is ADMS?
 
